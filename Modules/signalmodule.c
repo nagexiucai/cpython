@@ -504,6 +504,66 @@ signal_getsignal_impl(PyObject *module, int signalnum)
     }
 }
 
+
+/*[clinic input]
+signal.strsignal
+
+    signalnum: int
+    /
+
+Return the system description of the given signal.
+
+The return values can be such as "Interrupt", "Segmentation fault", etc.
+Returns None if the signal is not recognized.
+[clinic start generated code]*/
+
+static PyObject *
+signal_strsignal_impl(PyObject *module, int signalnum)
+/*[clinic end generated code: output=44e12e1e3b666261 input=b77914b03f856c74]*/
+{
+    char *res;
+
+    if (signalnum < 1 || signalnum >= NSIG) {
+        PyErr_SetString(PyExc_ValueError,
+                "signal number out of range");
+        return NULL;
+    }
+
+#ifdef MS_WINDOWS
+    /* Custom redefinition of POSIX signals allowed on Windows */
+    switch (signalnum) {
+        case SIGINT:
+            res = "Interrupt";
+            break;
+        case SIGILL:
+            res = "Illegal instruction";
+            break;
+        case SIGABRT:
+            res = "Aborted";
+            break;
+        case SIGFPE:
+            res = "Floating point exception";
+            break;
+        case SIGSEGV:
+            res = "Segmentation fault";
+            break;
+        case SIGTERM:
+            res = "Terminated";
+            break;
+        default:
+            Py_RETURN_NONE;
+    }
+#else
+    errno = 0;
+    res = strsignal(signalnum);
+
+    if (errno || res == NULL || strstr(res, "Unknown signal") != NULL)
+        Py_RETURN_NONE;
+#endif
+
+    return Py_BuildValue("s", res);
+}
+
 #ifdef HAVE_SIGINTERRUPT
 
 /*[clinic input]
@@ -759,7 +819,6 @@ iterable_to_sigset(PyObject *iterable, sigset_t *mask)
     int result = -1;
     PyObject *iterator, *item;
     long signum;
-    int err;
 
     sigemptyset(mask);
 
@@ -781,11 +840,24 @@ iterable_to_sigset(PyObject *iterable, sigset_t *mask)
         Py_DECREF(item);
         if (signum == -1 && PyErr_Occurred())
             goto error;
-        if (0 < signum && signum < NSIG)
-            err = sigaddset(mask, (int)signum);
-        else
-            err = 1;
-        if (err) {
+        if (0 < signum && signum < NSIG) {
+            if (sigaddset(mask, (int)signum)) {
+                if (errno != EINVAL) {
+                    /* Probably impossible */
+                    PyErr_SetFromErrno(PyExc_OSError);
+                    goto error;
+                }
+                /* For backwards compatibility, allow idioms such as
+                 * `range(1, NSIG)` but warn about invalid signal numbers
+                 */
+                const char *msg =
+                    "invalid signal number %ld, please use valid_signals()";
+                if (PyErr_WarnFormat(PyExc_RuntimeWarning, 1, msg, signum)) {
+                    goto error;
+                }
+            }
+        }
+        else {
             PyErr_Format(PyExc_ValueError,
                          "signal number %ld out of range", signum);
             goto error;
@@ -937,6 +1009,47 @@ signal_sigwait(PyObject *module, PyObject *sigset)
 }
 
 #endif   /* #ifdef HAVE_SIGWAIT */
+
+
+#if defined(HAVE_SIGFILLSET) || defined(MS_WINDOWS)
+
+/*[clinic input]
+signal.valid_signals
+
+Return a set of valid signal numbers on this platform.
+
+The signal numbers returned by this function can be safely passed to
+functions like `pthread_sigmask`.
+[clinic start generated code]*/
+
+static PyObject *
+signal_valid_signals_impl(PyObject *module)
+/*[clinic end generated code: output=1609cffbcfcf1314 input=86a3717ff25288f2]*/
+{
+#ifdef MS_WINDOWS
+#ifdef SIGBREAK
+    PyObject *tup = Py_BuildValue("(iiiiiii)", SIGABRT, SIGBREAK, SIGFPE,
+                                  SIGILL, SIGINT, SIGSEGV, SIGTERM);
+#else
+    PyObject *tup = Py_BuildValue("(iiiiii)", SIGABRT, SIGFPE, SIGILL,
+                                  SIGINT, SIGSEGV, SIGTERM);
+#endif
+    if (tup == NULL) {
+        return NULL;
+    }
+    PyObject *set = PySet_New(tup);
+    Py_DECREF(tup);
+    return set;
+#else
+    sigset_t mask;
+    if (sigemptyset(&mask) || sigfillset(&mask)) {
+        return PyErr_SetFromErrno(PyExc_OSError);
+    }
+    return sigset_to_set(mask);
+#endif
+}
+
+#endif   /* #if defined(HAVE_SIGFILLSET) || defined(MS_WINDOWS) */
 
 
 #if defined(HAVE_SIGWAITINFO) || defined(HAVE_SIGTIMEDWAIT)
@@ -1152,6 +1265,7 @@ static PyMethodDef signal_methods[] = {
     SIGNAL_SETITIMER_METHODDEF
     SIGNAL_GETITIMER_METHODDEF
     SIGNAL_SIGNAL_METHODDEF
+    SIGNAL_STRSIGNAL_METHODDEF
     SIGNAL_GETSIGNAL_METHODDEF
     {"set_wakeup_fd", (PyCFunction)signal_set_wakeup_fd, METH_VARARGS | METH_KEYWORDS, set_wakeup_fd_doc},
     SIGNAL_SIGINTERRUPT_METHODDEF
@@ -1162,6 +1276,9 @@ static PyMethodDef signal_methods[] = {
     SIGNAL_SIGWAIT_METHODDEF
     SIGNAL_SIGWAITINFO_METHODDEF
     SIGNAL_SIGTIMEDWAIT_METHODDEF
+#if defined(HAVE_SIGFILLSET) || defined(MS_WINDOWS)
+    SIGNAL_VALID_SIGNALS_METHODDEF
+#endif
     {NULL, NULL}           /* sentinel */
 };
 
