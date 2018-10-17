@@ -344,7 +344,7 @@ class GetSourceBase(unittest.TestCase):
 
     def sourcerange(self, top, bottom):
         lines = self.source.split("\n")
-        return "\n".join(lines[top-1:bottom]) + "\n"
+        return "\n".join(lines[top-1:bottom]) + ("\n" if bottom else "")
 
     def assertSourceEqual(self, obj, top, bottom):
         self.assertEqual(inspect.getsource(obj),
@@ -526,6 +526,16 @@ class TestRetrievingSourceCode(GetSourceBase):
 
     def test_getsource_on_code_object(self):
         self.assertSourceEqual(mod.eggs.__code__, 12, 18)
+
+class TestGettingSourceOfToplevelFrames(GetSourceBase):
+    fodderModule = mod
+
+    def test_range_toplevel_frame(self):
+        self.maxDiff = None
+        self.assertSourceEqual(mod.currentframe, 1, None)
+
+    def test_range_traceback_toplevel_frame(self):
+        self.assertSourceEqual(mod.tb, 1, None)
 
 class TestDecorators(GetSourceBase):
     fodderModule = mod2
@@ -712,8 +722,9 @@ class TestClassesAndFunctions(unittest.TestCase):
         self.assertEqual(varkw, varkw_e)
         self.assertEqual(defaults, defaults_e)
         if formatted is not None:
-            self.assertEqual(inspect.formatargspec(args, varargs, varkw, defaults),
-                             formatted)
+            with self.assertWarns(DeprecationWarning):
+                self.assertEqual(inspect.formatargspec(args, varargs, varkw, defaults),
+                                 formatted)
 
     def assertFullArgSpecEquals(self, routine, args_e, varargs_e=None,
                                     varkw_e=None, defaults_e=None,
@@ -729,8 +740,9 @@ class TestClassesAndFunctions(unittest.TestCase):
         self.assertEqual(kwonlydefaults, kwonlydefaults_e)
         self.assertEqual(ann, ann_e)
         if formatted is not None:
-            self.assertEqual(inspect.formatargspec(args, varargs, varkw, defaults,
-                                                    kwonlyargs, kwonlydefaults, ann),
+            with self.assertWarns(DeprecationWarning):
+                self.assertEqual(inspect.formatargspec(args, varargs, varkw, defaults,
+                                                       kwonlyargs, kwonlydefaults, ann),
                              formatted)
 
     def test_getargspec(self):
@@ -839,7 +851,7 @@ class TestClassesAndFunctions(unittest.TestCase):
     @cpython_only
     @unittest.skipIf(MISSING_C_DOCSTRINGS,
                      "Signature information for builtins requires docstrings")
-    def test_getfullagrspec_builtin_func(self):
+    def test_getfullargspec_builtin_func(self):
         import _testcapi
         builtin = _testcapi.docstring_with_signature_with_defaults
         spec = inspect.getfullargspec(builtin)
@@ -848,7 +860,7 @@ class TestClassesAndFunctions(unittest.TestCase):
     @cpython_only
     @unittest.skipIf(MISSING_C_DOCSTRINGS,
                      "Signature information for builtins requires docstrings")
-    def test_getfullagrspec_builtin_func_no_signature(self):
+    def test_getfullargspec_builtin_func_no_signature(self):
         import _testcapi
         builtin = _testcapi.docstring_no_signature
         with self.assertRaises(TypeError):
@@ -1498,6 +1510,20 @@ class TestGetcallargsFunctions(unittest.TestCase):
             pass
         with self.assertRaisesRegex(TypeError, "'a', 'b' and 'c'"):
             inspect.getcallargs(f6)
+
+        # bpo-33197
+        with self.assertRaisesRegex(ValueError,
+                                    'variadic keyword parameters cannot'
+                                    ' have default values'):
+            inspect.Parameter("foo", kind=inspect.Parameter.VAR_KEYWORD,
+                              default=42)
+        with self.assertRaisesRegex(ValueError,
+                                    "value 5 is not a valid Parameter.kind"):
+            inspect.Parameter("bar", kind=5, default=42)
+
+        with self.assertRaisesRegex(TypeError,
+                                   'name must be a str, not a int'):
+            inspect.Parameter(123, kind=4)
 
 class TestGetcallargsMethods(TestGetcallargsFunctions):
 
@@ -3099,7 +3125,8 @@ class TestParameterObject(unittest.TestCase):
         self.assertIs(p.annotation, p.empty)
         self.assertEqual(p.kind, inspect.Parameter.POSITIONAL_ONLY)
 
-        with self.assertRaisesRegex(ValueError, 'invalid value'):
+        with self.assertRaisesRegex(ValueError, "value '123' is "
+                                    "not a valid Parameter.kind"):
             inspect.Parameter('foo', default=10, kind='123')
 
         with self.assertRaisesRegex(ValueError, 'not a valid parameter name'):
@@ -3189,7 +3216,9 @@ class TestParameterObject(unittest.TestCase):
         self.assertEqual(p2.kind, p2.POSITIONAL_OR_KEYWORD)
         self.assertNotEqual(p2, p)
 
-        with self.assertRaisesRegex(ValueError, 'invalid value for'):
+        with self.assertRaisesRegex(ValueError,
+                                    "value <class 'inspect._empty'> "
+                                    "is not a valid Parameter.kind"):
             p2 = p2.replace(kind=p2.empty)
 
         p2 = p2.replace(kind=p2.KEYWORD_ONLY)
@@ -3202,7 +3231,9 @@ class TestParameterObject(unittest.TestCase):
     @cpython_only
     def test_signature_parameter_implicit(self):
         with self.assertRaisesRegex(ValueError,
-                                    'implicit arguments must be passed in as'):
+                                    'implicit arguments must be passed as '
+                                    'positional or keyword arguments, '
+                                    'not positional-only'):
             inspect.Parameter('.0', kind=inspect.Parameter.POSITIONAL_ONLY)
 
         param = inspect.Parameter(
@@ -3849,7 +3880,7 @@ def test_main():
         TestBoundArguments, TestSignaturePrivateHelpers,
         TestSignatureDefinitions, TestIsDataDescriptor,
         TestGetClosureVars, TestUnwrap, TestMain, TestReload,
-        TestGetCoroutineState
+        TestGetCoroutineState, TestGettingSourceOfToplevelFrames
     )
 
 if __name__ == "__main__":
