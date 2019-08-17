@@ -26,14 +26,13 @@ if sys.platform != 'win32':
     import tty
 
 import asyncio
-from asyncio import base_events
-from asyncio import constants
 from asyncio import coroutines
 from asyncio import events
 from asyncio import proactor_events
 from asyncio import selector_events
 from test.test_asyncio import utils as test_utils
 from test import support
+from test.support import ALWAYS_EQ, LARGEST, SMALLEST
 
 
 def tearDownModule():
@@ -253,12 +252,10 @@ class EventLoopTestsMixin:
         super().tearDown()
 
     def test_run_until_complete_nesting(self):
-        @asyncio.coroutine
-        def coro1():
-            yield
+        async def coro1():
+            await asyncio.sleep(0)
 
-        @asyncio.coroutine
-        def coro2():
+        async def coro2():
             self.assertTrue(self.loop.is_running())
             self.loop.run_until_complete(coro1())
 
@@ -475,6 +472,7 @@ class EventLoopTestsMixin:
         self.loop.add_signal_handler(signal.SIGALRM, my_handler)
 
         signal.setitimer(signal.ITIMER_REAL, 0.01, 0)  # Send SIGALRM once.
+        self.loop.call_later(60, self.loop.stop)
         self.loop.run_forever()
         self.assertEqual(caught, 1)
 
@@ -487,11 +485,12 @@ class EventLoopTestsMixin:
             nonlocal caught
             caught += 1
             self.assertEqual(args, some_args)
+            self.loop.stop()
 
         self.loop.add_signal_handler(signal.SIGALRM, my_handler, *some_args)
 
         signal.setitimer(signal.ITIMER_REAL, 0.1, 0)  # Send SIGALRM once.
-        self.loop.call_later(0.5, self.loop.stop)
+        self.loop.call_later(60, self.loop.stop)
         self.loop.run_forever()
         self.assertEqual(caught, 1)
 
@@ -665,9 +664,7 @@ class EventLoopTestsMixin:
                 super().data_received(data)
                 self.transport.write(expected_response)
 
-        lsock = socket.socket()
-        lsock.bind(('127.0.0.1', 0))
-        lsock.listen(1)
+        lsock = socket.create_server(('127.0.0.1', 0), backlog=1)
         addr = lsock.getsockname()
 
         message = b'test data'
@@ -735,8 +732,7 @@ class EventLoopTestsMixin:
 
     @mock.patch('asyncio.base_events.socket')
     def create_server_multiple_hosts(self, family, hosts, mock_sock):
-        @asyncio.coroutine
-        def getaddrinfo(host, port, *args, **kw):
+        async def getaddrinfo(host, port, *args, **kw):
             if family == socket.AF_INET:
                 return [(family, socket.SOCK_STREAM, 6, '', (host, port))]
             else:
@@ -1116,14 +1112,12 @@ class EventLoopTestsMixin:
                 super().connection_made(transport)
                 proto.set_result(self)
 
-        sock_ob = socket.socket(type=socket.SOCK_STREAM)
-        sock_ob.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock_ob.bind(('0.0.0.0', 0))
+        sock_ob = socket.create_server(('0.0.0.0', 0))
 
         f = self.loop.create_server(TestMyProto, sock=sock_ob)
         server = self.loop.run_until_complete(f)
         sock = server.sockets[0]
-        self.assertIs(sock, sock_ob)
+        self.assertEqual(sock.fileno(), sock_ob.fileno())
 
         host, port = sock.getsockname()
         self.assertEqual(host, '0.0.0.0')
@@ -1134,9 +1128,7 @@ class EventLoopTestsMixin:
         server.close()
 
     def test_create_server_addr_in_use(self):
-        sock_ob = socket.socket(type=socket.SOCK_STREAM)
-        sock_ob.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock_ob.bind(('0.0.0.0', 0))
+        sock_ob = socket.create_server(('0.0.0.0', 0))
 
         f = self.loop.create_server(MyProto, sock=sock_ob)
         server = self.loop.run_until_complete(f)
@@ -1256,11 +1248,6 @@ class EventLoopTestsMixin:
         server.transport.close()
 
     def test_create_datagram_endpoint_sock(self):
-        if (sys.platform == 'win32' and
-                isinstance(self.loop, proactor_events.BaseProactorEventLoop)):
-            raise unittest.SkipTest(
-                'UDP is not supported with proactor event loops')
-
         sock = None
         local_address = ('127.0.0.1', 0)
         infos = self.loop.run_until_complete(
@@ -1666,8 +1653,7 @@ class EventLoopTestsMixin:
             loop.add_writer(w, callback)
 
     def test_close_running_event_loop(self):
-        @asyncio.coroutine
-        def close_loop(loop):
+        async def close_loop(loop):
             self.loop.close()
 
         coro = close_loop(self.loop)
@@ -1677,8 +1663,7 @@ class EventLoopTestsMixin:
     def test_close(self):
         self.loop.close()
 
-        @asyncio.coroutine
-        def test():
+        async def test():
             pass
 
         func = lambda: False
@@ -2013,10 +1998,6 @@ if sys.platform == 'win32':
         def test_writer_callback_cancel(self):
             raise unittest.SkipTest("IocpEventLoop does not have add_writer()")
 
-        def test_create_datagram_endpoint(self):
-            raise unittest.SkipTest(
-                "IocpEventLoop does not have create_datagram_endpoint()")
-
         def test_remove_fds_after_closing(self):
             raise unittest.SkipTest("IocpEventLoop does not have add_reader()")
 else:
@@ -2146,7 +2127,8 @@ class HandleTests(test_utils.TestCase):
                         '<Handle cancelled>')
 
         # decorated function
-        cb = asyncio.coroutine(noop)
+        with self.assertWarns(DeprecationWarning):
+            cb = asyncio.coroutine(noop)
         h = asyncio.Handle(cb, (), self.loop)
         self.assertEqual(repr(h),
                         '<Handle noop() at %s:%s>'
@@ -2383,6 +2365,28 @@ class TimerTests(unittest.TestCase):
         self.assertIs(NotImplemented, h1.__eq__(h3))
         self.assertIs(NotImplemented, h1.__ne__(h3))
 
+        with self.assertRaises(TypeError):
+            h1 < ()
+        with self.assertRaises(TypeError):
+            h1 > ()
+        with self.assertRaises(TypeError):
+            h1 <= ()
+        with self.assertRaises(TypeError):
+            h1 >= ()
+        self.assertFalse(h1 == ())
+        self.assertTrue(h1 != ())
+
+        self.assertTrue(h1 == ALWAYS_EQ)
+        self.assertFalse(h1 != ALWAYS_EQ)
+        self.assertTrue(h1 < LARGEST)
+        self.assertFalse(h1 > LARGEST)
+        self.assertTrue(h1 <= LARGEST)
+        self.assertFalse(h1 >= LARGEST)
+        self.assertFalse(h1 < SMALLEST)
+        self.assertTrue(h1 > SMALLEST)
+        self.assertFalse(h1 <= SMALLEST)
+        self.assertTrue(h1 >= SMALLEST)
+
 
 class AbstractEventLoopTests(unittest.TestCase):
 
@@ -2484,30 +2488,6 @@ class AbstractEventLoopTests(unittest.TestCase):
         loop = asyncio.new_event_loop()
         loop.run_until_complete(inner())
         loop.close()
-
-
-class ProtocolsAbsTests(unittest.TestCase):
-
-    def test_empty(self):
-        f = mock.Mock()
-        p = asyncio.Protocol()
-        self.assertIsNone(p.connection_made(f))
-        self.assertIsNone(p.connection_lost(f))
-        self.assertIsNone(p.data_received(f))
-        self.assertIsNone(p.eof_received())
-
-        dp = asyncio.DatagramProtocol()
-        self.assertIsNone(dp.connection_made(f))
-        self.assertIsNone(dp.connection_lost(f))
-        self.assertIsNone(dp.error_received(f))
-        self.assertIsNone(dp.datagram_received(f, f))
-
-        sp = asyncio.SubprocessProtocol()
-        self.assertIsNone(sp.connection_made(f))
-        self.assertIsNone(sp.connection_lost(f))
-        self.assertIsNone(sp.pipe_data_received(1, f))
-        self.assertIsNone(sp.pipe_connection_lost(1, f))
-        self.assertIsNone(sp.process_exited())
 
 
 class PolicyTests(unittest.TestCase):
